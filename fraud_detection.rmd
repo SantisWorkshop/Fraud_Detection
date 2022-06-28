@@ -1,0 +1,190 @@
+---
+title: "Fraud Detection"
+author: "Santi"
+date: '2022-06-20'
+output: pdf_document
+---
+
+```{r warning = FALSE}
+loadLibraries() #This is just a function that loads essential stats libraries.
+fraud <- read.csv('fraud_detection.csv', header = TRUE)
+head(fraud)
+```
+
+```{r Data}
+# Look at data dims.
+dim(fraud) 
+
+# See if there are any NA's  and duplicate entries.
+sum(is.na(fraud))
+sum(duplicated(fraud))
+```
+# Data Summary and Graphs
+
+Let's make a summary for the data and convert the $isFraud$ and $isFlaggedFraud$
+to factors, so we can run the classification models. 
+
+```{r}
+summary(fraud)
+```
+
+```{r}
+fraud$isFraud <- as.factor(fraud$isFraud)
+```
+
+Now we can start our exploratory analysis. The transaction amount has a large
+number of ouliers, so we will restrice the amount value to $3,500,000.
+```{r Graphs}
+ggplot(data = fraud, aes(x = isFraud, y = amount, color = isFraud)) +
+  coord_cartesian( ylim =  c(0, 3500000)) +
+  geom_boxplot() +
+  ylab('Amount ($)') +
+  xlab('Fraud Detection') +
+  ggtitle('Boxplot of Transaction Amounts and Fraud Detection')
+```
+
+```{r}
+flagged_table <- table(fraud$isFraud, fraud$isFlaggedFraud)
+flagged_table
+
+correct_flag <- table(fraud$isFraud, fraud$isFlaggedFraud)[2,2] / 
+                sum(table(fraud$isFraud, fraud$isFlaggedFraud)[2,])
+cat(correct_flag * 100, "% of the fradulent transactions were flagged as such.")
+```
+Note the system we currently have does poorly when at detecting fraudulent 
+transactions (0.19%). The names of the person making and receiving the 
+transactions are also recorded but they offer no significance so we remove those 
+from the data set.
+
+```{r}
+fraudNew <- subset(fraud, select = - c(nameOrig, nameDest))
+attach(fraudNew)
+dim(fraudNew)
+```
+
+Now lets run some data analysis. First let's make a train and test set. Let's 
+randomly select 100,000 observations as our training data and the rest as test
+data. Why? Well if I do a larger amount my computer really slows down.
+
+```{r}
+set.seed(3)
+
+train <- sample(1:nrow(fraudNew), 100000)
+test <- (-train)
+
+fraud_train <- fraudNew[train, ]
+fraud_test <- fraudNew[test, ]
+
+isFraud_test <- fraudNew[test, 'isFraud']
+```
+
+#Logistic Regression 
+
+First let's do logistic regression to detect fraudulent transactions. Since this
+data has a high null rate, we know we will run into issues.
+
+```{r Logistic Regression}
+
+null_tab <-table(isFraud)
+
+null_rate <- table(isFraud_test)[1]/length(isFraud_test)
+null_rate
+
+
+set.seed(3)
+
+fraud_glm = glm(isFraud ~ ., data = fraud_train,
+                family = binomial)
+summary(fraud_glm)
+
+# Predict the responders that are diagnosed with heart disease.
+glm_pred = predict(fraud_glm, data = fraudNew[test, ], type = 'response')
+vec = rep(0, length(isFraud))
+vec[glm_pred >= 0.2] = 1
+
+table(vec, isFraud)
+```
+#Bagging 
+
+Let's first do bagging with 100 trees.
+```{r}
+set.seed(3)
+bag_fraud <- randomForest(isFraud ~ ., data = fraudNew, subset = train,
+                         mtry = 8, ntree = 100, importance = TRUE)
+```
+
+Once that is done, predict the remaining fraud cases. We use `type = 'class'`
+since we are doing classification. This will allow us to make a table to
+determine accuracy (see below).
+```{r}
+set.seed(3)
+
+yhat_bag <- predict(bag_fraud, newdata = fraud_test, type = 'class')
+varImpPlot(bag_fraud, main = 'Predictor Importance Using Bagging')
+
+```
+
+In this case note that Mean Decrease Accuracy is low for the first 4 predictors: 
+old balance of the account initiating the transaction $(oldbalanceOrg)$ , the 
+new balance of the destination account holder, $(newbalanceDest)$, the type of 
+transaction $type$ and the transaction amount $(amount)$ and then follow a large
+jump. 
+
+```{r}
+# Table
+bag_table <- table('Prediction' = yhat_bag, 'True Value' = isFraud_test)
+bag_table
+
+sum(diag(bag_table))/ sum(bag_table)
+bag_table[2,2]/ sum(bag_table[2, ])
+```
+
+#Random Forests
+
+Let's try random forests on the training data set. We allow the model to pick
+$\sqrt{8} \approx 3$ features at each node. With 1,00 trees.6
+
+```{r}
+set.seed(3)
+rf_fraud <- randomForest(isFraud ~ ., data = fraudNew, subset = train,
+                         mtry = 3, ntree = 100, importance = TRUE)
+
+set.seed(3)
+
+yhat_rf <- predict(rf_fraud, newdata = fraud_test, type = 'class')
+
+varImpPlot(rf_fraud, main ='R.F with mtry = 3 and 100 trees')
+```
+
+Here the most important predictors are The old balance of the account initiating
+the transaction, $(oldbalanceOrg)$ , the new balance of the destination account
+holder, $(newbalanceDest)$, and the transaction amount $(amount)$
+```{r}
+# Table
+rf_table <- table('Prediction' = yhat_rf, 'True Value' = isFraud_test)
+rf_table
+
+sum(diag(rf_table))/ sum(rf_table)
+rf_table[2,2]/ sum(rf_table[2, ])
+```
+
+Now as mentioned before this data set has a large null rate. So our overall 
+error would be small if we simply made our predictions all be zero. Instead we 
+focus our results on the fraud detection rate. That is to say, we measure how 
+well our model is at detection fraud itself. Below are such rates for the 
+flagged rate $isFlaggedFraud$, bagging, and boosting.
+
+\begin{center}
+\begin{table}
+\centering
+\begin{tabular}{|c|c|c|}
+\hline
+Flagged & Bagging & Boosting \\
+\hline
+0.19\% & 95.65\% & 98.34\%\\
+\hline
+\end{tabular}
+\caption{Fraud Detection Rate}
+\end{table}
+\end{center}
+
